@@ -19,7 +19,7 @@ import os
 # Also https://en.wikipedia.org/wiki/Finite_difference_coefficient
 def finite_difference_second_derivative_GP_neg_unscaled_map(model, likelihood, train_x, train_y, h_i_step=5e-2, h_j_step=5e-2, h_i_vec=[0.0, 0.0, 0.0], h_j_vec=[0.0, 0.0, 0.0], prior=None):
     #curr_params = torch.tensor(list(model.parameters()))
-    curr_params = torch.tensor([p for p in list(model.hyperparameters()) if p.requires_grad])
+    curr_params = torch.cat([p.flatten() for p in list(model.hyperparameters()) if p.requires_grad])
     mll_fkt = gpytorch.mlls.ExactMarginalLogLikelihood(likelihood, model)
     if prior is not None:
         theta_mu = prior.mean
@@ -93,6 +93,8 @@ class Lap():
 
     def __call__(self, pos_unscaled_optimum, model_parameters, **kwargs):
         logging = kwargs.get("logging", False)
+        flat_func = lambda x: torch.cat([e.flatten() for e in x])
+        model_param_count = flat_func(model_parameters).numel()
         neg_unscaled_optimum = -pos_unscaled_optimum
         if logging:
             hessian, hessian_logs = self.calc_hessian(neg_unscaled_optimum, model_parameters, **kwargs)
@@ -100,7 +102,7 @@ class Lap():
         else:
             hessian = self.calc_hessian(neg_unscaled_optimum, model_parameters, **kwargs)
             constructed_eigvals_log = self.eigenvalue_correction(hessian, self.threshold, **kwargs)
-        punish_term = 0.5*(len(model_parameters)*torch.log(torch.tensor(2*torch.pi)) - torch.sum(torch.log(torch.tensor(constructed_eigvals_log))))
+        punish_term = 0.5*(model_param_count*torch.log(torch.tensor(2*torch.pi)) - torch.sum(torch.log(torch.tensor(constructed_eigvals_log))))
         laplace = -neg_unscaled_optimum + punish_term
         if not torch.isfinite(laplace) and laplace > 0:
             import pdb
@@ -113,7 +115,7 @@ class Lap():
                 "parameter values" : copy.deepcopy(model_parameters),
                 "neg MAP": neg_unscaled_optimum,
                 "punish term": punish_term,
-                "laplace without replacement": -neg_unscaled_optimum + 0.5*(len(model_parameters)*torch.log(torch.tensor(2*torch.pi)) - torch.logdet(hessian)),
+                "laplace without replacement": -neg_unscaled_optimum + 0.5*(model_param_count*torch.log(torch.tensor(2*torch.pi)) - torch.logdet(hessian)),
                 "constructed eigvals log": constructed_eigvals_log,
                 "correction term": self.threshold,
                 "use finite differences": kwargs.get("use_finite_difference_hessian", False),
@@ -148,17 +150,19 @@ class Lap():
                 pdb.set_trace()
                 print(f"E:{E}")
             hessian_neg_unscaled_map_raw = []
+            flat_func = lambda x: torch.cat([e.flatten() for e in x])
+            jacobian_neg_unscaled_map = flat_func(jacobian_neg_unscaled_map)
             # Calcuate -\nabla\nabla log(f(\theta)) (i.e. Hessian of negative log posterior)
             for i in range(len(jacobian_neg_unscaled_map)):
-                hessian_neg_unscaled_map_raw.append(torch.autograd.grad(jacobian_neg_unscaled_map[i], model_parameters, retain_graph=True, allow_unused=True))
+                hessian_neg_unscaled_map_raw.append(flat_func(torch.autograd.grad(jacobian_neg_unscaled_map[i], model_parameters, retain_graph=True, allow_unused=True)))
 
-            hessian_neg_unscaled_map_raw = torch.tensor(hessian_neg_unscaled_map_raw)
+            hessian_neg_unscaled_map_raw = torch.stack(hessian_neg_unscaled_map_raw)
             hessian_neg_unscaled_map_raw = hessian_neg_unscaled_map_raw.to(torch.float64)
             hessian_neg_unscaled_map_raw = hessian_neg_unscaled_map_raw + hessian_neg_unscaled_map_raw.t()
             hessian_neg_unscaled_map_raw = hessian_neg_unscaled_map_raw / 2.0
         # Calculate the Hessian using finite differences
         if (bool_use_finite_difference_hessian or logging) and model is not None:
-            hessian_neg_unscaled_finite_differences = torch.tensor(finite_difference_hessian(model, model.likelihood, len(model_parameters), model.train_inputs[0], model.train_targets, prior=self.prior))
+            hessian_neg_unscaled_finite_differences = torch.tensor(finite_difference_hessian(model, model.likelihood, len(flat_func(model_parameters)), model.train_inputs[0], model.train_targets, prior=self.prior))
 
             hessian_neg_unscaled_finite_differences = hessian_neg_unscaled_finite_differences.to(torch.float64)
             hessian_neg_unscaled_finite_differences = hessian_neg_unscaled_finite_differences + hessian_neg_unscaled_finite_differences.t()
@@ -339,7 +343,7 @@ class AIC():
         pass
 
     def __call__(self, pos_unscaled_mll, num_params, **kwargs):
-        logging = kwargs.get("logging", False)
+        logging = kwargs.get("logging", True)
         start = time.time()
         aic = 2*num_params - 2*(pos_unscaled_mll)
         end = time.time()
@@ -400,6 +404,9 @@ def manual_mll(likelihood):
     def A(pred, train_y):
         cov = safe_covariance_matrix(pred.covariance_matrix)
         # instead of torch.linalg.inv(cov) we use torch.linalg.solve for better numerical stability
+        # if shapes are wrong, flatten the train_y to ensure it's a 1D tensor
+        if train_y.ndim > 1:
+            train_y = train_y.flatten()
         return -0.5 * train_y.T @ torch.linalg.solve(cov, train_y)
 
     def B(pred, train_y):
@@ -407,6 +414,8 @@ def manual_mll(likelihood):
         return -0.5 * torch.logdet(cov)
 
     def C(pred, train_y):
+        if train_y.ndim > 1:
+            train_y = train_y.flatten()
         return -0.5 * train_y.size(0) * np.log(2 * np.pi)
 
     mll = lambda latent_pred, train_y: A(likelihood(latent_pred), train_y) + \
@@ -430,7 +439,8 @@ class MAP():
             mll = given_mll
         gradient_needed = kwargs.get("gradient_needed", False)
         with torch.set_grad_enabled(gradient_needed):
-            mll_value = mll(model(train_x), train_y) 
+            latent = model(train_x)
+            mll_value = mll(latent, train_y) 
             if given_mll:
                 mll_value = mll_value* len(*model.train_inputs)
             if not self.logarithmic:
@@ -440,7 +450,7 @@ class MAP():
             else:
                 map = mll_value + prior.log_prob(extract_trainable_model_parameters(model))
             if self.scaling:
-                map = map / len(*model.train_inputs)
+                map = map / latent.event_shape.numel()
             if logging:
                 logables = {"scaling": self.scaling,
                             "logarithmic": self.logarithmic,
@@ -474,20 +484,21 @@ class MLL():
         self.scaling = scaling
 
     def __call__(self, model, likelihood, train_x, train_y, given_mll=None, **kwargs):
-        logging = kwargs.get("logging", False)
+        logging = kwargs.get("logging", True)
         if given_mll is None:
             A, B, C, mll = manual_mll(likelihood)
         else:
             mll = given_mll
         gradient_needed = kwargs.get("gradient_needed", False)
         with torch.set_grad_enabled(gradient_needed):
-            mll_value = mll(model(train_x), train_y) 
+            latent = model(train_x)
+            mll_value = mll(latent, train_y) 
             if given_mll:
                 mll_value = mll_value* len(*model.train_inputs)
             if not self.logarithmic:
                 mll_value = torch.exp(mll_value)
             if self.scaling: 
-                mll_value = mll_value / len(*model.train_inputs)
+                mll_value = mll_value / latent.event_shape.numel()
             if logging:
                 logables = {"scaling": self.scaling,
                             "logarithmic": self.logarithmic,}

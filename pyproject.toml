@@ -15,3 +15,7 @@ dynamic=["version"]
 
 [tool.hatch.version]
 source = "vcs"
+
+[pytest]
+testpaths = ["test"]
+addopts = ["--import-mode=importlib"]
