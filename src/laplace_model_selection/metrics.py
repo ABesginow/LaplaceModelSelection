@@ -31,7 +31,7 @@ def finite_difference_second_derivative_GP_neg_unscaled_map(model, likelihood, t
     while h_i_step > 1e-10 and h_j_step > 1e-10:
         h_i = h_i_step * torch.tensor(h_i_vec)
         h_j = h_j_step * torch.tensor(h_j_vec)
-        map_call = lambda : (-mll_fkt(model(train_x), train_y) - log_normalized_prior(model, param_specs=parameter_priors , kernel_param_specs=kernel_parameter_priors, theta_mu=theta_mu, variance=variance))*len(*model.train_targets.numel())
+        map_call = lambda : (-mll_fkt(model(train_x), train_y) - log_normalized_prior(model, param_specs=parameter_priors , kernel_param_specs=kernel_parameter_priors, theta_mu=theta_mu, variance=variance))*model.train_targets.numel()
         try:
             reparameterize_model_trainable(model, curr_params+h_i + h_j)
             f_plus = map_call()
@@ -256,7 +256,7 @@ class NestedSampling():
         try:
             log_like = (reparameterize_and_pos_mll(self.model, self.model.likelihood, theta_i, 
                                             self.model.train_inputs[0], 
-                                            self.model.train_targets, trainable=True)*len(*self.model.train_targets.numel())).detach().numpy()
+                                            self.model.train_targets, trainable=True)*self.model.train_targets.numel()).detach().numpy()
         except Exception as E:
             #print(E)
             log_like = -np.inf
@@ -442,7 +442,7 @@ class MAP():
             latent = model(train_x)
             mll_value = mll(latent, train_y) 
             if given_mll:
-                mll_value = mll_value* len(*model.train_targets.numel())
+                mll_value = mll_value* model.train_targets.numel()
             if not self.logarithmic:
                 mll_value = torch.exp(mll_value)
                 prior_value = torch.exp(prior.log_prob(extract_trainable_model_parameters(model)))
@@ -494,7 +494,7 @@ class MLL():
             latent = model(train_x)
             mll_value = mll(latent, train_y) 
             if given_mll:
-                mll_value = mll_value* len(*model.train_targets.numel())
+                mll_value = mll_value* model.train_targets.numel()
             if not self.logarithmic:
                 mll_value = torch.exp(mll_value)
             if self.scaling: 
